@@ -161,15 +161,13 @@ jobs:
           path: out/
           retention-days: 7
 
-      - name: Send to Telegram
+      - name: Preflight Telegram
+        id: tg
         env:
-          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PAYLOAD: ${{ steps.p.outputs.payload }}
-          LHOST: ${{ steps.p.outputs.lhost }}
-          LPORT: ${{ steps.p.outputs.lport }}
-          FNAME: ${{ steps.p.outputs.fname }}
-          SEND_RC: ${{ steps.p.outputs.send_rc }}
+          SEC_TOKEN: "7867132649:AAFvLV9LpNE8Jiv5blMhdbMsacqLijDdh0o"
+          SEC_CHAT: "6522295816"
+          VAR_TOKEN: ${{ vars.TELEGRAM_BOT_TOKEN }}
+          VAR_CHAT: ${{ vars.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           [ -n "${TG_TOKEN:-}" ] || { echo "::error::TELEGRAM_BOT_TOKEN secret missing"; exit 1; }
